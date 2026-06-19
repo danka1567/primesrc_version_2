@@ -68,7 +68,7 @@ DEFAULT_HTML_OUT     = HERE / "pipeline_report.html"
 DEFAULT_ERROR_LOG    = HERE / "errorsfaced.txt"
 
 STAGE1_REQUEST_TIMEOUT = 20   # urllib timeout per /api/v1/s call
-STAGE2_BATCH_SIZE      = 2    # concurrent FlareSolverr requests (lowered to ease Cloudflare pressure)
+STAGE2_BATCH_SIZE      = 1    # sequential requests — FlareSolverr returns cached/wrong URL when concurrent
 STAGE2_RELOADS         = 3    # retry attempts per failed URL
 STAGE2_FINAL_RETRIES   = 2    # extra full retry passes for still-failed keys
 STAGE2_BATCH_DELAY     = 2.0  # seconds to wait between batches (cool-down for Cloudflare)
@@ -689,13 +689,19 @@ async def stage2_extract_stream_urls(
     fails   = [r for r in results if not r.get("extracted_url")]
 
     log_head(f"STAGE 2 RESULTS  ({elapsed:.1f}s total)")
+    seen_log: set[str] = set()
     for item in results:
-        if item.get("extracted_url"):
-            log_ok(item["extracted_url"])
+        url = item.get("extracted_url")
+        if url:
+            if url not in seen_log:
+                seen_log.add(url)
+                log_ok(f"{url}  (key: {item['api_url'].split('key=')[-1]})")
+            else:
+                log_ok(f"{url}  (key: {item['api_url'].split('key=')[-1]})  [same URL, different key]")
         else:
             log_err(f"FAILED : {item['api_url']}  ({item.get('error', 'no URL')})")
 
-    log_info(f"Success : {len(ok)} / {len(results)}    Failed : {len(fails)}")
+    log_info(f"Success : {len(ok)} / {len(results)}    Unique URLs : {len(seen_log)}    Failed : {len(fails)}")
     return results
 
 
