@@ -843,7 +843,8 @@ def _write_summary(
         sources: list[dict[str, str]] = []
         n = 1
         while f"host-{n}" in e:
-            sources.append({"host": e[f"host-{n}"], "url": e[f"url-{n}"]})
+            # Restore key field if stored, else use url as fallback identifier
+            sources.append({"host": e[f"host-{n}"], "url": e[f"url-{n}"], "key": e.get(f"key-{n}", e[f"url-{n}"])})
             n += 1
         index[tmdb_int] = {
             "tmdb_id":      tmdb_int,
@@ -861,8 +862,8 @@ def _write_summary(
 
         if tmdb_int in index:
             entry = index[tmdb_int]
-            existing_keys = {s.get("key", s["url"]) for s in entry["_sources"]}
-            added = [s for s in new_sources if s.get("key", s["url"]) not in existing_keys]
+            existing_keys = {s["key"] for s in entry["_sources"]}
+            added = [s for s in new_sources if s["key"] not in existing_keys]
             entry["_sources"].extend(added)
             entry["extracted_at"] = extracted_at
             log_info(f"  tmdb={tmdb_int} — merged {len(added)} new source(s)")
@@ -899,6 +900,7 @@ def _write_summary(
         for n, src in enumerate(e["_sources"], 1):
             row[f"host-{n}"] = src["host"]
             row[f"url-{n}"]  = src["url"]
+            row[f"key-{n}"]  = src.get("key", src["url"])  # persisted for dedup on re-runs
         output.append(row)
 
     json_path.write_text(_format_summary_json(output), encoding="utf-8")
@@ -1153,7 +1155,7 @@ def github_sync_summary(
         sources: list[dict[str, str]] = []
         n = 1
         while f"host-{n}" in e:
-            sources.append({"host": e[f"host-{n}"], "url": e[f"url-{n}"]})
+            sources.append({"host": e[f"host-{n}"], "url": e[f"url-{n}"], "key": e.get(f"key-{n}", e[f"url-{n}"])})
             n += 1
         index[tmdb_int] = {
             "tmdb_id":      tmdb_int,
@@ -1170,8 +1172,8 @@ def github_sync_summary(
         tmdb_int = int(tmdb_str)
         if tmdb_int in index:
             entry         = index[tmdb_int]
-            existing_urls = {s["url"] for s in entry["_sources"]}
-            added         = [s for s in new_sources if s["url"] not in existing_urls]
+            existing_keys = {s["key"] for s in entry["_sources"]}
+            added         = [s for s in new_sources if s["key"] not in existing_keys]
             entry["_sources"].extend(added)
             entry["extracted_at"] = extracted_at
             log_info(f"  tmdb={tmdb_int} — merged {len(added)} new source(s)")
@@ -1208,6 +1210,7 @@ def github_sync_summary(
         for n, src in enumerate(e["_sources"], 1):
             row[f"host-{n}"] = src["host"]
             row[f"url-{n}"]  = src["url"]
+            row[f"key-{n}"]  = src.get("key", src["url"])  # persisted for dedup on re-runs
         output.append(row)
 
     total_sources = sum(sum(1 for k in r if k.startswith("url-")) for r in output)
