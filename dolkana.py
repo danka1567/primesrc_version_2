@@ -68,7 +68,7 @@ DEFAULT_HTML_OUT     = HERE / "pipeline_report.html"
 DEFAULT_ERROR_LOG    = HERE / "errorsfaced.txt"
 
 STAGE1_REQUEST_TIMEOUT = 20   # urllib timeout per /api/v1/s call
-STAGE2_BATCH_SIZE      = 1    # sequential requests — FlareSolverr returns cached/wrong URL when concurrent
+STAGE2_BATCH_SIZE      = 2    # concurrent requests — each key gets its own isolated FlareSolverr session
 STAGE2_RELOADS         = 3    # retry attempts per failed URL
 STAGE2_FINAL_RETRIES   = 2    # extra full retry passes for still-failed keys
 STAGE2_BATCH_DELAY     = 2.0  # seconds to wait between batches (cool-down for Cloudflare)
@@ -472,12 +472,20 @@ async def _resolve_one_flaresolverr(
 ) -> dict[str, Any]:
     loop  = asyncio.get_running_loop()
     label = f"[{index:>3}/{total}]"
+    # Each key gets its own isolated browser session so concurrent requests
+    # never share a tab and never return each other's cached response.
+    key_session_id = f"{session_id}_{index}"
 
     async with sem:
         await safe_print(f"{label} → {api_url}")
+        # Create a dedicated session for this key
+        await loop.run_in_executor(None, lambda: _fs_post(base_url, {
+            "cmd": "sessions.create", "session": key_session_id
+        }))
         last_error: str | None = None
 
-        for attempt in range(reloads + 1):
+        try:
+          for attempt in range(reloads + 1):
             if attempt:
                 # Exponential backoff (1.5s, 3s, 6s, 12s …), with a longer
                 # forced cool-down whenever Cloudflare is actively blocking
@@ -497,7 +505,7 @@ async def _resolve_one_flaresolverr(
                         "cmd":        "request.get",
                         "url":        api_url,
                         "maxTimeout": timeout_ms,
-                        "session":    session_id,
+                        "session":    key_session_id,
                     }),
                 )
 
@@ -545,12 +553,20 @@ async def _resolve_one_flaresolverr(
                 await safe_print(f"{label} ✗ (FS) {last_error}")
                 _record_log_entry("ERR", f"{label} {api_url} — {last_error}")
 
-        return {
+          return {
             "index":         index,
             "api_url":       api_url,
             "error":         last_error or "failed",
             "extracted_url": None,
-        }
+          }
+        finally:
+            # Always destroy the per-key session to free browser resources
+            try:
+                await loop.run_in_executor(None, lambda: _fs_post(base_url, {
+                    "cmd": "sessions.destroy", "session": key_session_id
+                }))
+            except Exception:
+                pass
 
 
 async def _process_batch_fs(
