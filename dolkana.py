@@ -295,12 +295,13 @@ def stage1_fetch_api_keys(
             errors.append((embed_url, str(exc)))
             log_err(f"{label} {exc}  {embed_url}")
 
-    # Deduplicate by api_url
-    seen_api: set[str] = set()
+    # Deduplicate by key value — same key from different embed URLs must
+    # only be processed once (they resolve to the exact same stream URL).
+    seen_keys: set[str] = set()
     unique_options: list[ServerOption] = []
     for opt in all_options:
-        if opt.api_url not in seen_api:
-            seen_api.add(opt.api_url)
+        if opt.key not in seen_keys:
+            seen_keys.add(opt.key)
             unique_options.append(opt)
 
     api_list_file.write_text(
@@ -674,12 +675,24 @@ async def stage2_extract_stream_urls(
 
     results.sort(key=lambda r: r.get("index", 0))
 
+    # Deduplicate extracted stream URLs — different keys can resolve to the
+    # same CDN URL; write each unique URL only once, keeping insertion order.
+    seen_stream_urls: set[str] = set()
     lines: list[str] = []
+    dupes_skipped = 0
     for item in results:
-        if item.get("extracted_url"):
-            lines.append(item["extracted_url"])
+        url = item.get("extracted_url")
+        if url:
+            if url in seen_stream_urls:
+                dupes_skipped += 1
+                lines.append(f"# DUPLICATE (skipped): {url}  (key: {item['api_url']})")
+            else:
+                seen_stream_urls.add(url)
+                lines.append(url)
         else:
             lines.append(f"# FAILED: {item['api_url']}  ({item.get('error', 'no URL')})")
+    if dupes_skipped:
+        log_warn(f"Duplicate stream URLs skipped in Stage 2: {dupes_skipped}")
     stream_out_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     log_ok(f"Stream URLs → {stream_out_file}")
 
@@ -808,6 +821,10 @@ def _write_summary(
 ) -> None:
     link_map = {r["api_url"]: r.get("extracted_url") or "" for r in stage2_results}
 
+    # Deduplicate stream URLs globally across all tmdb groups — a stream URL
+    # that appears for more than one key (or more than one embed URL) is only
+    # kept the first time it is seen, regardless of which tmdb it belongs to.
+    seen_stream_urls_global: set[str] = set()
     new_groups_raw: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for opt in stage1_options:
         stream_url = link_map.get(opt.api_url, "")
@@ -817,9 +834,11 @@ def _write_summary(
         tmdb = qs.get("tmdb", "")
         if not tmdb:
             continue
-        # Deduplicate within this run by URL — same stream URL must appear once per tmdb
-        if stream_url not in new_groups_raw[tmdb]:
-            new_groups_raw[tmdb][stream_url] = {"host": urlparse(stream_url).netloc, "url": stream_url}
+        # Skip if this exact stream URL was already recorded (for any tmdb)
+        if stream_url in seen_stream_urls_global:
+            continue
+        seen_stream_urls_global.add(stream_url)
+        new_groups_raw[tmdb][stream_url] = {"host": urlparse(stream_url).netloc, "url": stream_url}
     new_groups: dict[str, list[dict[str, Any]]] = {
         tmdb: list(url_map.values()) for tmdb, url_map in new_groups_raw.items()
     }
@@ -1126,6 +1145,10 @@ def github_sync_summary(
     log_info(f"Remote total: {len(remote_records)} entries across {len(file_meta)} file(s)")
 
     link_map = {r["api_url"]: r.get("extracted_url") or "" for r in stage2_results}
+    # Deduplicate stream URLs globally across all tmdb groups — a stream URL
+    # that appears for more than one key (or more than one embed URL) is only
+    # kept the first time it is seen, regardless of which tmdb it belongs to.
+    seen_stream_urls_global: set[str] = set()
     new_groups_raw: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for opt in stage1_options:
         stream_url = link_map.get(opt.api_url, "")
@@ -1135,9 +1158,11 @@ def github_sync_summary(
         tmdb = qs.get("tmdb", "")
         if not tmdb:
             continue
-        # Deduplicate within this run by URL — same stream URL must appear once per tmdb
-        if stream_url not in new_groups_raw[tmdb]:
-            new_groups_raw[tmdb][stream_url] = {"host": urlparse(stream_url).netloc, "url": stream_url}
+        # Skip if this exact stream URL was already recorded (for any tmdb)
+        if stream_url in seen_stream_urls_global:
+            continue
+        seen_stream_urls_global.add(stream_url)
+        new_groups_raw[tmdb][stream_url] = {"host": urlparse(stream_url).netloc, "url": stream_url}
     new_groups: dict[str, list[dict[str, Any]]] = {
         tmdb: list(url_map.values()) for tmdb, url_map in new_groups_raw.items()
     }
